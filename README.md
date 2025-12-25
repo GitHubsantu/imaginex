@@ -8,3 +8,11 @@ by understanding their content.
 
 ## Day 1
 - Manual file renaming (GUI)
+
+### Current Features
+- Batch rename
+- Filename cleaner
+- Preview + Undo
+- Dark / Light mode
+- Activity terminal
+
