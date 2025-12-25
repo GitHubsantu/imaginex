@@ -9,7 +9,20 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPlainTextEdit
 )
 from PyQt6.QtGui import QIcon, QFont
-from core.renamer import rename_file, preview_rename, undo_rename
+from core.renamer import rename_file, preview_rename, undo_rename, batch_rename
+THEMES = {
+    "dark": """
+        QWidget { background:#0d1117; color:#c9d1d9; }
+        QLineEdit { background:#161b22; padding:6px; border-radius:6px; }
+        QPushButton { background:#21262d; padding:8px; border-radius:6px; }
+        QPushButton:hover { background:#30363d; }
+    """,
+    "light": """
+        QWidget { background:#ffffff; color:#000000; }
+        QLineEdit { background:#f0f0f0; padding:6px; }
+        QPushButton { background:#e0e0e0; padding:8px; }
+    """
+}
 
 icon_path = "./assets/imaginex64x64.png"
 
@@ -17,15 +30,41 @@ icon_path = "./assets/imaginex64x64.png"
 class ImaginexApp(QWidget):
     def __init__(self):
         super().__init__()
+        self.current_theme = "dark"
         self.setWindowIcon(QIcon(icon_path))
         self.setWindowTitle("Imaginex • Smart File Renamer")
-        self.setFixedSize(420, 320)
+        self.setFixedSize(420, 400)
         self.init_ui()
             
 
     def init_ui(self):
         main_layout = QVBoxLayout()
+        header_layout = QHBoxLayout()
+        main_layout.addLayout(header_layout)
         main_layout.setSpacing(10)
+
+        
+
+        self.theme_btn = QPushButton("🌙")
+        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_btn.setFixedSize(32, 32)
+        self.theme_btn.setToolTip("Toggle theme")
+        self.theme_btn.clicked.connect(self.toggle_theme)
+
+        self.theme_btn.setStyleSheet("""
+        QPushButton {
+            border: none;
+            border-radius: 16px;
+            background-color: #21262d;
+        }
+        QPushButton:hover {
+            background-color: #30363d;
+        }
+        """)
+
+        #header_layout.addWidget(title)
+        header_layout.addStretch()   # 🔥 THIS pushes button to right
+        header_layout.addWidget(self.theme_btn)
 
         title = QLabel("Imaginex")
         title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
@@ -80,6 +119,7 @@ class ImaginexApp(QWidget):
         self.preview_label.setStyleSheet("color: #1e88e5;")
 
         # Buttons
+
         rename_btn = QPushButton("✍️ Confirm Rename")
         rename_btn.clicked.connect(self.rename_action)
 
@@ -101,6 +141,7 @@ class ImaginexApp(QWidget):
         main_layout.addLayout(btn_layout)
 
         self.setLayout(main_layout)
+        self.setStyleSheet(THEMES[self.current_theme])
 
     def log_to_terminal(self, message, level="INFO"):
         colors = {
@@ -118,9 +159,15 @@ class ImaginexApp(QWidget):
         )
 
     def select_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select File")
-        if file_path:
-            self.file_input.setText(file_path)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Files")
+        if files:
+            self.selected_files = files
+            if len(files)>1:
+                    self.file_input.setText(f"{len(files)} files selected")
+            else:
+                    self.file_input.setText(f"{(files)}")
+            self.log_to_terminal(f"{(files)}", "INFO")
+
             self.show_preview()
 
     def show_preview(self):
@@ -139,26 +186,46 @@ class ImaginexApp(QWidget):
 
     def rename_action(self):
         try:
-            path = self.file_input.text()
-            name = self.name_input.text().strip()
+            # 1. Validation
+            base_name = self.name_input.text().strip()
+            if not hasattr(self, 'selected_files') or not self.selected_files:
+                raise ValueError("No files selected. Please browse and select files first.")
+            if not base_name:
+                raise ValueError("Please enter a base name for the batch rename.")
 
-            if not path or not name:
-                raise ValueError("Please select a file and enter a new name")
-            
-            reply = QMessageBox.question(None, "Confirm", "Do you want to Rename?", 
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            # 2. Confirmation Dialog (From your reference)
+            count = len(self.selected_files)
+            reply = QMessageBox.question(
+                self, "Confirm Batch Rename", 
+                f"Are you sure you want to rename {count} files?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
             if reply == QMessageBox.StandardButton.Yes:
-                new_path = rename_file(path, name)
-                self.log_to_terminal(f"File renamed to: {new_path.name}", "SUCCESS")
-                QMessageBox.information(
-                    self, "Success",
-                    f"File renamed to: {new_path.name}"
-                )
+                self.log_to_terminal(f"Starting batch rename for {count} files...", "INFO")
+                
+                # 3. Execution
+                # Assuming your core.renamer.batch_rename returns a list of new paths
+                renamed_paths = batch_rename(self.selected_files, base_name)
+                
+                # 4. Success Logging & Feedback
+                success_msg = f"Successfully renamed {len(renamed_paths)} files."
+                self.log_to_terminal(success_msg, "SUCCESS")
+                
+                
+                # Show Success Alert
+                QMessageBox.information(self, "Success", success_msg)
+                
+                # Optional: Clear selection after success
+                self.selected_files = []
+                self.file_input.clear()
 
         except Exception as e:
-            error = str(e)
-            self.log_to_terminal(f"Error: {error}", "ERROR")
-            QMessageBox.critical(self, "Error", error)
+            # Error handling for both terminal and popup
+            error_msg = str(e)
+            self.log_to_terminal(f"BATCH ERROR: {error_msg}", "ERROR")
+            QMessageBox.critical(self, "Error", error_msg)
+
             
 
     def undo_action(self):
@@ -174,6 +241,21 @@ class ImaginexApp(QWidget):
                     error = str(e)
                     self.log_to_terminal(f"Error: {error}", "ERROR")
                     QMessageBox.information(self, "Undo", error)
+    
+    def toggle_theme(self):
+        if self.current_theme == "dark":
+            self.current_theme = "light"
+            self.theme_btn.setText("☀")
+        else:
+            self.current_theme = "dark"
+            self.theme_btn.setText("🌙")
+
+        self.setStyleSheet(THEMES[self.current_theme])
+        self.log_to_terminal(
+            f"Theme switched to {self.current_theme.upper()}",
+            "INFO"
+        )
+
 
 
 if __name__ == "__main__":

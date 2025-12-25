@@ -1,0 +1,1 @@
+self.selected_files = []
