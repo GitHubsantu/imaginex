@@ -1,8 +1,7 @@
 import sys
+import os
 from pathlib import Path
-
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QLineEdit, QFileDialog, QMessageBox,
@@ -10,6 +9,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QFont
 from core.renamer import rename_file, preview_rename, undo_rename, batch_rename
+from core.image_exif import get_image_date
+from core.visual_analysis import analyze_brightness, count_faces
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".tiff", ".bmp"}
 THEMES = {
     "dark": """
         QWidget { background:#0d1117; color:#c9d1d9; }
@@ -24,8 +26,17 @@ THEMES = {
     """
 }
 
-icon_path = "./assets/imaginex64x64.png"
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and PyInstaller """
+    try:
+        base_path = sys._MEIPASS  # PyInstaller temp folder
+    except AttributeError:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+icon_path = resource_path("assets/imaginex64x64.png")
 
 class ImaginexApp(QWidget):
     def __init__(self):
@@ -157,90 +168,194 @@ class ImaginexApp(QWidget):
         self.terminal.verticalScrollBar().setValue(
             self.terminal.verticalScrollBar().maximum()
         )
+    def is_mixed_file_types(self, files):
+        has_image = False
+        has_other = False
+
+        for f in files:
+            ext = Path(f).suffix.lower()
+            if ext in IMAGE_EXTENSIONS:
+                has_image = True
+            else:
+                has_other = True
+
+        return has_image and has_other
 
     def select_file(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select Files")
-        if files:
-            self.selected_files = files
-            if len(files)>1:
-                    self.file_input.setText(f"{len(files)} files selected")
+        if not files:
+            return
+
+        self.selected_files = files
+
+        # UI text
+        if len(files) > 1:
+            self.file_input.setText(f"{len(files)} files selected")
+        else:
+            self.file_input.setText(files[0])
+
+        # 🔥 MIXED FILE TYPE CHECK (FIRST)
+        if self.is_mixed_file_types(files):
+            self.log_to_terminal(
+                "Mixed file types detected → smart naming disabled",
+                "WARN"
+            )
+            self.name_input.clear()
+            self.preview_label.clear()
+            return
+
+        # =========================
+        # 🔥 SINGLE FILE LOGIC
+        # =========================
+        if len(files) == 1:
+            base_name = ""
+
+            # 🔹 EXIF AUTO SUGGESTION
+            year_month = get_image_date(files[0])
+            if year_month:
+                year, month = year_month
+                base_name = f"Photo_{month}_{year}"
+                self.log_to_terminal("EXIF found (Date Taken)", "SUCCESS")
             else:
-                    self.file_input.setText(f"{(files)}")
-            self.log_to_terminal(f"{(files)}", "INFO")
+                self.log_to_terminal(
+                    "EXIF missing (no Date Taken found)",
+                    "WARN"
+                )
 
-            self.show_preview()
+            # 🔹 VISUAL ANALYSIS
+            try:
+                brightness = analyze_brightness(files[0])
+                faces = count_faces(files[0])
 
+                if faces >= 3:
+                    scene = "Group_Photo"
+                elif faces == 1:
+                    scene = "Portrait"
+                else:
+                    scene = "Photo"
+
+                self.log_to_terminal(
+                    f"Visual analysis → {brightness}, Faces: {faces}",
+                    "INFO"
+                )
+
+                # Combine EXIF + visual result
+                if base_name:
+                    final_name = f"{scene}_{base_name.replace('Photo_', '')}"
+                else:
+                    final_name = scene
+
+                self.name_input.setText(final_name)
+
+            except Exception as e:
+                self.log_to_terminal(
+                    f"Visual analysis skipped: {e}",
+                    "WARN"
+                )
+                if base_name:
+                    self.name_input.setText(base_name)
+
+        # =========================
+        # 🔥 BATCH FILE LOGIC
+        # =========================
+        else:
+            # Batch → EXIF from first file only
+            year_month = get_image_date(files[0])
+            if year_month:
+                year, month = year_month
+                base_name = f"Photo_{month}_{year}"
+                self.name_input.setText(base_name)
+                self.log_to_terminal(
+                    "EXIF found (batch base name set)",
+                    "INFO"
+                )
+            else:
+                self.log_to_terminal(
+                    "EXIF missing for batch (manual name required)",
+                    "WARN"
+                )
+
+        # 🔥 PREVIEW ALWAYS AT END
+        self.show_preview()
+
+            
     def show_preview(self):
         try:
-            path = self.file_input.text()
-            name = self.name_input.text().strip()
+            if not hasattr(self, "selected_files") or not self.selected_files:
+                return
 
-            if path and name:
-                new_path = preview_rename(path, name)
-                self.log_to_terminal(f"Preview:\n{Path(path).name}  →  {new_path.name}", "INFO")
-            else:
-                self.log_to_terminal("")
+            name = self.name_input.text().strip()
+            if not name:
+                self.preview_label.clear()
+                return
+
+            first_file = Path(self.selected_files[0])
+            new_path = preview_rename(first_file, name)
+
+            self.preview_label.setText(
+                f"Preview: {first_file.name}  →  {new_path.name}"
+            )
+
         except Exception as e:
-            error = str(e)
-            self.log_to_terminal(f"Error: {error}", "ERROR")
+            self.log_to_terminal(str(e), "ERROR")
 
     def rename_action(self):
         try:
-            # 1. Validation
-            base_name = self.name_input.text().strip()
-            if not hasattr(self, 'selected_files') or not self.selected_files:
-                raise ValueError("No files selected. Please browse and select files first.")
-            if not base_name:
-                raise ValueError("Please enter a base name for the batch rename.")
+            if not hasattr(self, "selected_files") or not self.selected_files:
+                raise ValueError("No files selected")
 
-            # 2. Confirmation Dialog (From your reference)
+            name_input = self.name_input.text().strip()
+            if not name_input:
+                raise ValueError("Please enter name")
+
             count = len(self.selected_files)
-            reply = QMessageBox.question(
-                self, "Confirm Batch Rename", 
-                f"Are you sure you want to rename {count} files?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
 
-            if reply == QMessageBox.StandardButton.Yes:
-                self.log_to_terminal(f"Starting batch rename for {count} files...", "INFO")
-                
-                # 3. Execution
-                # Assuming your core.renamer.batch_rename returns a list of new paths
-                renamed_paths = batch_rename(self.selected_files, base_name)
-                
-                # 4. Success Logging & Feedback
-                success_msg = f"Successfully renamed {len(renamed_paths)} files."
-                self.log_to_terminal(success_msg, "SUCCESS")
-                
-                
-                # Show Success Alert
-                QMessageBox.information(self, "Success", success_msg)
-                
-                # Optional: Clear selection after success
-                self.selected_files = []
-                self.file_input.clear()
+            if count == 1:
+                # 🔹 SINGLE FILE
+                new_path = rename_file(self.selected_files[0], name_input)
+                self.log_to_terminal(f"Renamed: {new_path.name}", "SUCCESS")
+                QMessageBox.information(self, "Success", f"Renamed to: {new_path.name}")
+
+            else:
+                # 🔹 BATCH FILES
+                reply = QMessageBox.question(
+                    self, "Confirm Batch Rename",
+                    f"Rename {count} files?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+                renamed = batch_rename(self.selected_files, name_input)
+                self.log_to_terminal(f"Batch renamed {len(renamed)} files", "SUCCESS")
+                QMessageBox.information(
+                    self, "Success",
+                    f"Renamed {len(renamed)} files successfully"
+                )
+
+            # reset after success
+            self.selected_files = []
+            self.file_input.clear()
+            self.name_input.clear()
+            self.preview_label.clear()
+
 
         except Exception as e:
-            # Error handling for both terminal and popup
-            error_msg = str(e)
-            self.log_to_terminal(f"BATCH ERROR: {error_msg}", "ERROR")
-            QMessageBox.critical(self, "Error", error_msg)
+            self.log_to_terminal(str(e), "ERROR")
+            QMessageBox.critical(self, "Error", str(e))
 
             
 
     def undo_action(self):
-        self.log_to_terminal("You are trying to Undo.", "WARN")
-        reply = QMessageBox.question(None, "Confirm", "Do you want to Undo?", 
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
-        if reply == QMessageBox.StandardButton.Yes:
-                try:
-                    old_path = undo_rename()
-                    self.log_to_terminal(f"Undo successful:\n{old_path.name}", "WARN")
-                except Exception as e:
-                    error = str(e)
-                    self.log_to_terminal(f"Error: {error}", "ERROR")
-                    QMessageBox.information(self, "Undo", error)
+        try:
+            count = undo_rename()
+            self.log_to_terminal(f"Undo successful ({count} files)", "WARN")
+            QMessageBox.information(self, "Undo", f"Restored {count} file(s)")
+        except Exception as e:
+            self.log_to_terminal(str(e), "ERROR")
+            QMessageBox.information(self, "Undo", str(e))
+
     
     def toggle_theme(self):
         if self.current_theme == "dark":
